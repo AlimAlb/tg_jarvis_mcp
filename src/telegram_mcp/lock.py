@@ -2,37 +2,56 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 from pathlib import Path
 
 
 class InstanceLock:
-    """An exclusive lockfile; deliberately fail rather than split update consumption."""
+    """An exclusive kernel-held lockfile for one telegram-mcp instance.
+
+    Exclusion lives in an ``fcntl.flock`` on a persistent lock file, so the OS
+    releases the lock when the process dies for any reason (SIGKILL, terminal
+    shutdown, WSL teardown). The file itself only stores the holder PID for
+    diagnostics: a leftover file from a killed process never blocks the next
+    start, and the file is intentionally never unlinked (unlinking would let
+    a waiter lock a different inode).
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._held = False
+        self._descriptor: int | None = None
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as error:
-            raise RuntimeError(
-                f"Another telegram-mcp process may already be running ({self.path}). "
-                "Remove a stale lock only after verifying no server process is running."
-            ) from error
-        try:
-            os.write(descriptor, f"{os.getpid()}\n".encode())
-        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            holder_pid = self._holder_pid(descriptor)
             os.close(descriptor)
-        self._held = True
+            raise RuntimeError(f"Another telegram-mcp process is already running (pid {holder_pid}).") from error
+        try:
+            os.ftruncate(descriptor, 0)
+            os.write(descriptor, f"{os.getpid()}\n".encode())
+        except OSError:
+            pass
+        self._descriptor = descriptor
 
     def release(self) -> None:
-        if not self._held:
+        if self._descriptor is None:
             return
         try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-        self._held = False
+            fcntl.flock(self._descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self._descriptor)
+            self._descriptor = None
+
+    @staticmethod
+    def _holder_pid(descriptor: int) -> str:
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            raw = os.read(descriptor, 64)
+        except OSError:
+            return "unknown"
+        return raw.decode(errors="replace").strip() or "unknown"

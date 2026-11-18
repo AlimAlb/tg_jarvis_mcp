@@ -98,7 +98,7 @@ telegram_finish(summary: "Fixed callback URL construction", changes: ["Updated c
 - Every accepted response must match both an allowlisted chat ID and an allowlisted user ID. It must also match the stored question's exact chat/user pair.
 - Open-text replies must be direct replies to the exact registered question. Button callback data contains an unguessable UUID and is checked against the question, its chat, and its user.
 - `getUpdates` offsets, conversations, pending questions, and answers persist in SQLite. A restart does not discard an answer.
-- The lock prevents two local processes from consuming the same Telegram update stream. Remove a stale lock only after verifying no server process is running.
+- The lock prevents two local processes from consuming the same Telegram update stream. It is held in the kernel (`flock`), so a killed or crashed server never leaves a stale lock behind; the lock file only stores the holder PID and never blocks the next start by itself.
 - Tool validation caps every Telegram message below Telegram's 4096-character limit. Never send secrets, credentials, environment variables, or large logs.
 - A question is valid for one hour by default. `telegram_wait` intentionally waits no more than five minutes per call, so the MCP client does not appear hung indefinitely.
 - This first version permits one pending question per conversation. Start separate conversations for independent tasks.
